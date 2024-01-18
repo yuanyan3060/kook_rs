@@ -11,6 +11,7 @@ use serde::{
     ser::SerializeStruct,
     Deserialize, Serialize,
 };
+use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -108,6 +109,10 @@ impl<H: KookHandle> crate::Kook<H> {
                                             }
                                         });
                                     },
+                                    Ok(Message::UnknownEvent {sn, event}) => {
+                                        max_sn = max_sn.max(sn);
+                                        tracing::error!("unknown event:{}", serde_json::to_string(&event).unwrap_or("to string failed".to_string()));
+                                    },
                                     Ok(Message::Pong) => {
                                         ping_count = 0;
                                     },
@@ -119,8 +124,7 @@ impl<H: KookHandle> crate::Kook<H> {
                             }
                         }
                     }
-                }
-                // WsStateMachine::Resume(_) => {} TODO
+                } // WsStateMachine::Resume(_) => {} TODO
             }
         }
     }
@@ -158,6 +162,7 @@ enum WsStateMachine {
 #[derive(Debug)]
 enum Message {
     Event { sn: u64, event: Event },
+    UnknownEvent { sn: u64, event: Value },
     Hello { code: i32, session_id: Option<String> },
     Ping { sn: u64 },
     Pong,
@@ -221,6 +226,7 @@ impl<'de> Deserialize<'de> for Message {
                 #[derive(Deserialize)]
                 #[serde(untagged)]
                 enum Data {
+                    Event(Event),
                     Hello {
                         code: i32,
                         #[serde(default)]
@@ -233,7 +239,7 @@ impl<'de> Deserialize<'de> for Message {
                     ResumeAck {
                         session_id: String,
                     },
-                    Event(Event),
+                    UnknownEvent(Value),
                 }
 
                 let mut s: Option<u8> = None;
@@ -255,7 +261,11 @@ impl<'de> Deserialize<'de> for Message {
                         sn: sn.ok_or(DeError::missing_field("sn"))?,
                         event,
                     }),
-                    (0, _) => Err(DeError::custom("d must be Event")),
+                    (0, Some(Data::UnknownEvent(event))) => Ok(Self::Value::UnknownEvent {
+                        sn: sn.ok_or(DeError::missing_field("sn"))?,
+                        event,
+                    }),
+                    (0, _) => Err(DeError::custom("d must be event")),
                     (1, Some(Data::Hello { code, session_id })) => Ok(Self::Value::Hello { code, session_id }),
                     (1, _) => Err(DeError::custom("d must be Hello")),
                     (2, _) => Ok(Self::Value::Ping {
@@ -284,6 +294,13 @@ impl Serialize for Message {
     {
         match self {
             Message::Event { sn, event } => {
+                let mut s = serializer.serialize_struct("Message", 3)?;
+                s.serialize_field("s", &0)?;
+                s.serialize_field("d", event)?;
+                s.serialize_field("sn", sn)?;
+                s.end()
+            }
+            Message::UnknownEvent { sn, event } => {
                 let mut s = serializer.serialize_struct("Message", 3)?;
                 s.serialize_field("s", &0)?;
                 s.serialize_field("d", event)?;
